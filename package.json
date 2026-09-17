@@ -3,9 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "start": "node --preserve-symlinks-main --preserve-symlinks server.cjs",
+    "start": "node --preserve-symlinks-main --preserve-symlinks app.cjs",
     "test": "node --preserve-symlinks-main --preserve-symlinks test.cjs && node --preserve-symlinks-main --preserve-symlinks test-runtime.cjs && node --preserve-symlinks-main --preserve-symlinks test-cloud.cjs",
     "build": "node --preserve-symlinks-main --preserve-symlinks build.cjs"
   },
-  "main": "server.cjs"
+  "main": "app.cjs"
 }

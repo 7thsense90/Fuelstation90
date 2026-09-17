@@ -14,7 +14,7 @@ Updates use a transaction and revision check. Conflicts return a refresh-and-ret
 
 - Framework: Other (Node.js backend).
 - Node: 24 LTS.
-- Entry file: server.cjs.
+- Entry file: app.cjs (starts when imported by Hostinger).
 - Root directory: repository root.
 - Start command: npm start.
 - Build command, if required: npm run build.

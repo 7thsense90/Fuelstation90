@@ -35,4 +35,4 @@ Local records are in `data/store.json`; photos are in `data/evidence/`. Both are
 
 The default server is local-only. Hosted mode requires an HTTPS `PUBLIC_ORIGIN`, a persistent `FUEL_DATA_DIR`, and a previously provisioned active Super Admin. See [DEPLOYMENT.md](DEPLOYMENT.md) for the optional single-server container configuration and outstanding production work.
 
-This is a development build with deployment preparation. It is not yet a verified live production service. The JSON store supports one process only, sessions are in memory, and Supabase migration, account recovery and production acceptance remain pending.
+This is a development build with deployment preparation. It is not yet a verified live production service. Local mode uses a single-process JSON store. Supabase mode adds transaction-protected cloud records, persistent sessions and private photos. Existing authentication is preserved; Supabase Auth is not used. Account recovery and production acceptance remain pending.

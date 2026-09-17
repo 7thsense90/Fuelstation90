@@ -4,14 +4,17 @@ const operationsDashboard=require('./dashboard.cjs');
 const reconciliation=require('./reconciliation.cjs');
 const http=require('node:http'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const runtime=require('./runtime.cjs').configuration();
+const cloud=process.env.SUPABASE_URL?new (require('./supabase-store.cjs').SupabaseStore)():null;
+let cloudRevision=0;
 const root=__dirname,file=path.join(process.env.FUEL_DATA_DIR||path.join(root,'data'),'store.json');
-fs.mkdirSync(path.dirname(file),{recursive:true});
-let db=fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):{users:[],stations:[],audit:[]};
+if(!cloud)fs.mkdirSync(path.dirname(file),{recursive:true});
+let db=!cloud&&fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):{users:[],stations:[],audit:[]};
 for(const kind of ['fuels','rates','machines','nozzles','shifts','assignments','runs','meterReconciliations'])db[kind] ||= [];
-if(runtime.production&&!db.users.some(u=>u.role==='super_admin'&&u.status==='active'))throw Error('Restore a verified store with an active Super Admin before production startup.');
+if(!cloud&&runtime.production&&!db.users.some(u=>u.role==='super_admin'&&u.status==='active'))throw Error('Restore a verified store with an active Super Admin before production startup.');
 const sessions=new Map(),attempts=new Map();
 const id=()=>crypto.randomUUID();
-function save(){const fd=fs.openSync(file+'.tmp','w');try{fs.writeFileSync(fd,JSON.stringify(db,null,2));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.renameSync(file+'.tmp',file);}
+const sessionKey=token=>crypto.createHash('sha256').update(token||'').digest('hex');
+async function save(){if(cloud){cloudRevision=await cloud.save(db,sessions,cloudRevision);return;}const fd=fs.openSync(file+'.tmp','w');try{fs.writeFileSync(fd,JSON.stringify(db,null,2));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.renameSync(file+'.tmp',file);}
 function password(p,s=crypto.randomBytes(16).toString('hex')){return {salt:s,hash:crypto.scryptSync(p,s,64).toString('hex')};}
 function verify(p,u){return crypto.timingSafeEqual(Buffer.from(password(p,u.salt).hash,'hex'),Buffer.from(u.hash,'hex'));}
 function clean(u){const {hash,salt,...rest}=u;return rest;}
@@ -28,27 +31,29 @@ try{
 const url=new URL(req.url,'http://localhost'),route=url.pathname;
 if(!runtime.acceptsHost(req.headers.host))fail(403,'Use the configured portal address to connect.');
 if(runtime.origin)res.setHeader('Strict-Transport-Security','max-age=31536000');
-if(route==='/api/health'&&req.method==='GET')return send(200,{ok:true});
+if(cloud&&route.startsWith('/api/')){const state=await cloud.load();db=state.db;cloudRevision=state.revision;sessions.clear();for(const [key,value]of state.sessions)if(value.expires>Date.now())sessions.set(key,value);if(runtime.production&&!db.users.some(u=>u.role==='super_admin'&&u.status==='active'))fail(503,'Cloud database needs an active Super Admin.');}
+if(route==='/api/health'&&req.method==='GET')return send(200,{ok:true,storage:cloud?'supabase':'local'});
 if(!['GET','POST'].includes(req.method))fail(405,'This action is not supported.');
 if(req.method==='POST'){if(!(req.headers['content-type']||'').toLowerCase().startsWith('application/json'))fail(415,'Send this action as JSON.');if(req.headers['sec-fetch-site']==='cross-site')fail(403,'Cross-site actions are not allowed.');beforeMutation=JSON.stringify(db);}
 if(route==='/api/logout'&&req.method!=='POST')fail(405,'Sign out requires confirmation from the page.');
 if(['/api/status','/api/me'].includes(route)&&req.method!=='GET')fail(405,'This action is not supported.');
 if(req.method!=='GET'&&req.headers.origin&&!runtime.acceptsOrigin(req.headers.origin,req.headers.host))fail(403,'Request origin is not allowed.');
 if(route==='/api/status')return send(200,{setupRequired:db.users.length===0});
-if(route==='/api/setup'&&req.method==='POST'){if(runtime.production)fail(403,'Initial setup is disabled on the hosted portal.');if(db.users.length)fail(403,'Initial setup has already been completed.');const b=await body(req);const u=addUser(b,'super_admin',null);audit(u,'platform_initialized',u.id);save();return send(201,{ok:true});}
+if(route==='/api/setup'&&req.method==='POST'){if(runtime.production)fail(403,'Initial setup is disabled on the hosted portal.');if(db.users.length)fail(403,'Initial setup has already been completed.');const b=await body(req);const u=addUser(b,'super_admin',null);audit(u,'platform_initialized',u.id);await save();return send(201,{ok:true});}
 if(route==='/api/login'&&req.method==='POST'){
-const ip=req.socket.remoteAddress,prior=attempts.get(ip);if(prior&&prior.count>=10&&Date.now()-prior.time<900000)fail(429,'Too many attempts. Try again in 15 minutes.');
-const b=await body(req),u=db.users.find(u=>u.email===String(b.email).toLowerCase().trim());
+const b=await body(req);const email=String(b.email).toLowerCase().trim();if(cloud&&!await cloud.loginAttempt(email))fail(429,'Too many attempts. Try again in 15 minutes.');
+const ip=cloud?email:req.socket.remoteAddress,prior=attempts.get(ip);if(prior&&prior.count>=10&&Date.now()-prior.time<900000)fail(429,'Too many attempts. Try again in 15 minutes.');
+const u=db.users.find(u=>u.email===email);
 if(!u||typeof b.password!=='string'||!verify(b.password,u)||u.status!=='active'||(u.stationId&&db.stations.find(s=>s.id===u.stationId)?.status!=='active')){attempts.set(ip,{count:prior&&Date.now()-prior.time<900000?prior.count+1:1,time:prior?.time&&Date.now()-prior.time<900000?prior.time:Date.now()});fail(401,'Unable to sign in. Check your details or contact your administrator.');}
-attempts.delete(ip);const token=crypto.randomBytes(32).toString('hex');sessions.set(token,{userId:u.id,expires:Date.now()+28800000});res.setHeader('Set-Cookie',`session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${runtime.cookieSuffix}`);return send(200,{user:clean(u)});}
-const token=(req.headers.cookie||'').split('; ').find(c=>c.startsWith('session='))?.slice(8),session=sessions.get(token),u=session&&session.expires>Date.now()?db.users.find(u=>u.id===session.userId):null;
+attempts.delete(ip);if(cloud)await cloud.clearLoginAttempts(email);const token=crypto.randomBytes(32).toString('hex');sessions.set(sessionKey(token),{userId:u.id,expires:Date.now()+28800000});if(cloud)await save();res.setHeader('Set-Cookie',`session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${runtime.cookieSuffix}`);return send(200,{user:clean(u)});}
+const token=(req.headers.cookie||'').split('; ').find(c=>c.startsWith('session='))?.slice(8),session=sessions.get(sessionKey(token)),u=session&&session.expires>Date.now()?db.users.find(u=>u.id===session.userId):null;
 if(route.startsWith('/api/')){
 if(!u||u.status!=='active'||(u.stationId&&db.stations.find(s=>s.id===u.stationId)?.status!=='active'))fail(401,'Please sign in to continue.');
-if(route==='/api/logout'){sessions.delete(token);res.setHeader('Set-Cookie','session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'+runtime.cookieSuffix);return send(200,{ok:true});}
+if(route==='/api/logout'){sessions.delete(sessionKey(token));if(cloud)await save();res.setHeader('Set-Cookie','session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'+runtime.cookieSuffix);return send(200,{ok:true});}
 if(route==='/api/me')return send(200,{user:clean(u),station:db.stations.find(s=>s.id===u.stationId)||null});
 
 ï»¿ï»¿ï»¿if(route==='/api/reconciliation-settings'){
- if(u.role!=='station_admin')fail(403,'Only Station Admins can configure reconciliation.');const station=db.stations.find(s=>s.id===u.stationId);if(req.method==='GET')return send(200,{frequency:station.reconciliationFrequency||'weekly'});const b=await body(req);if(!['daily','weekly','monthly'].includes(b.frequency))fail(400,'Choose daily, weekly or monthly.');const previous=station.reconciliationFrequency||'weekly';station.reconciliationFrequency=b.frequency;audit(u,'reconciliation_frequency_updated',station.id,{frequency:previous},{frequency:b.frequency});save();return send(200,{frequency:b.frequency});
+ if(u.role!=='station_admin')fail(403,'Only Station Admins can configure reconciliation.');const station=db.stations.find(s=>s.id===u.stationId);if(req.method==='GET')return send(200,{frequency:station.reconciliationFrequency||'weekly'});const b=await body(req);if(!['daily','weekly','monthly'].includes(b.frequency))fail(400,'Choose daily, weekly or monthly.');const previous=station.reconciliationFrequency||'weekly';station.reconciliationFrequency=b.frequency;audit(u,'reconciliation_frequency_updated',station.id,{frequency:previous},{frequency:b.frequency});await save();return send(200,{frequency:b.frequency});
 }
 if(route==='/api/meter-reconciliations'||route.startsWith('/api/meter-reconciliations/')){
  if(u.role!=='station_admin')fail(403,'Only Station Admins can reconcile meter readings.');const recId=route.split('/')[3],action=route.split('/')[4],existing=recId?db.meterReconciliations.find(r=>r.id===recId&&r.stationId===u.stationId):null;if(recId&&!existing)fail(404,'Reconciliation not found.');if(req.method==='GET')return send(200,existing||db.meterReconciliations.filter(r=>r.stationId===u.stationId).slice().reverse());
@@ -63,13 +68,13 @@ if(route==='/api/meter-reconciliations'||route.startsWith('/api/meter-reconcilia
  const fromIso=new Date(from).toISOString(),toIso=new Date(to).toISOString();if(db.meterReconciliations.some(r=>r.id!==recId&&r.stationId===u.stationId&&r.machineId===machine.id&&r.from===fromIso&&r.to===toIso))fail(409,'This machine already has a reconciliation for that exact interval. Open it to edit or recheck.');
  record=existing||{id:id(),stationId:u.stationId,createdAt:now,createdBy:u.id,revisions:[]};Object.assign(record,{machineId:machine.id,machineName:machine.name,from:fromIso,to:toIso,frequency:b.frequency,readings});
  }
- if(previous)record.revisions.push({...previous,archivedAt:now});record.results=meterComparison.compare(db,record);record.status=record.results.some(r=>r.status==='Incomplete')?'Incomplete':record.results.some(r=>r.status==='Mismatch')?'Mismatch':'Matched';record.checkedAt=now;record.checkedBy=u.id;record.revision=(record.revision||0)+1;if(!existing)db.meterReconciliations.push(record);audit(u,'meter_reconciliation_'+(action==='recheck'?'rechecked':existing?'corrected':'created'),record.id,previous,JSON.parse(JSON.stringify({...record,revisions:undefined})));save();return send(existing?200:201,record);
+ if(previous)record.revisions.push({...previous,archivedAt:now});record.results=meterComparison.compare(db,record);record.status=record.results.some(r=>r.status==='Incomplete')?'Incomplete':record.results.some(r=>r.status==='Mismatch')?'Mismatch':'Matched';record.checkedAt=now;record.checkedBy=u.id;record.revision=(record.revision||0)+1;if(!existing)db.meterReconciliations.push(record);audit(u,'meter_reconciliation_'+(action==='recheck'?'rechecked':existing?'corrected':'created'),record.id,previous,JSON.parse(JSON.stringify({...record,revisions:undefined})));await save();return send(existing?200:201,record);
 }
 
 if(route.startsWith('/api/evidence/')){
  const evidenceId=route.split('/')[3];const run=db.runs.find(r=>r.stationId===u.stationId&&(u.role==='station_admin'||(u.role==='salesman'&&r.salesmanId===u.id))&&r.readings.some(n=>[n.opening,n.closing].some(e=>e?.photoId===evidenceId)));
  if(!run)fail(404,'Photo not found.');const reading=run.readings.flatMap(n=>[n.opening,n.closing]).find(e=>e?.photoId===evidenceId);
- res.writeHead(200,{'Content-Type':reading.mime,'Content-Disposition':'inline','Content-Security-Policy':"default-src 'none'"});return res.end(fs.readFileSync(path.join(path.dirname(file),'evidence',evidenceId)));
+ const bytes=cloud?await cloud.download(run.stationId,evidenceId):fs.readFileSync(path.join(path.dirname(file),'evidence',evidenceId));res.writeHead(200,{'Content-Type':reading.mime,'Content-Disposition':'inline','Content-Security-Policy':"default-src 'none'"});return res.end(bytes);
 }
 if(route==='/api/runs'||route.startsWith('/api/runs/')){
  if(!['station_admin','salesman'].includes(u.role))fail(403,'Only station staff can access shift records.');
@@ -84,15 +89,15 @@ if(route==='/api/runs'||route.startsWith('/api/runs/')){
  if(db.runs.some(r=>r.status!=='completed'&&(r.salesmanId===u.id||r.machineId===assignment.machineId)))fail(409,'You or this machine already have an unfinished shift.');
  if(!db.machines.some(m=>m.id===assignment.machineId&&m.status==='active'))fail(400,'This machine is inactive. Contact your Station Admin.');
  if(assignment.snapshot.nozzles.some(n=>!db.nozzles.some(x=>x.id===n.id&&x.status==='active')||!db.fuels.some(f=>f.id===n.fuelId&&f.status==='active')))fail(400,'The assigned nozzles or fuel types are inactive. Contact your Station Admin.');
- const run={id:id(),stationId:u.stationId,salesmanId:u.id,machineId:assignment.machineId,assignmentId:assignment.id,snapshot:JSON.parse(JSON.stringify(assignment.snapshot)),status:'opening',createdAt:now,readings:assignment.snapshot.nozzles.map(n=>({nozzleId:n.id,number:n.number,fuelId:n.fuelId,fuelName:n.fuelName}))};db.runs.push(run);audit(u,'shift_opening_started',run.id,null,JSON.parse(JSON.stringify(run)));save();return send(201,run);}
+ const run={id:id(),stationId:u.stationId,salesmanId:u.id,machineId:assignment.machineId,assignmentId:assignment.id,snapshot:JSON.parse(JSON.stringify(assignment.snapshot)),status:'opening',createdAt:now,readings:assignment.snapshot.nozzles.map(n=>({nozzleId:n.id,number:n.number,fuelId:n.fuelId,fuelName:n.fuelName}))};db.runs.push(run);audit(u,'shift_opening_started',run.id,null,JSON.parse(JSON.stringify(run)));await save();return send(201,run);}
  const run=db.runs.find(r=>r.id===runId&&owns(r));if(!run)fail(404,'Shift not found.');
  if(run.status==='completed'){if(action==='submit')return send(200,run);fail(403,'Completed shifts cannot be changed.');}
  const beforeRun=JSON.parse(JSON.stringify(run));
  const decimal=reconciliation.parseDecimal;
  if(action==='reading'){
  const stage=run.status==='opening'?'opening':run.status==='closing'?'closing':null;if(!stage)fail(400,'Readings cannot be changed at this step.');const reading=run.readings.find(n=>n.nozzleId===b.nozzleId);if(!reading)fail(400,'Select a nozzle belonging to this shift.');const value=decimal(b.value,3,'meter reading');if(stage==='closing'&&value<reading.opening.value)fail(400,'Closing reading cannot be lower than opening reading.');
- let photo=reading[stage];if(b.photo){const match=/^data:image\/(jpeg|png);base64,([A-Za-z0-9+/=]+)$/.exec(b.photo);if(!match)fail(400,'Use a JPEG or PNG photo.');const bytes=Buffer.from(match[2],'base64');if(bytes.length>3*1024*1024||bytes.length<24)fail(400,'Use a photo smaller than 3 MB.');if(match[1]==='jpeg'&&!(bytes[0]===255&&bytes[1]===216&&bytes[2]===255))fail(400,'Invalid JPEG photo.');if(match[1]==='png'&&!bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))fail(400,'Invalid PNG photo.');const photoId=id();const folder=path.join(path.dirname(file),'evidence');fs.mkdirSync(folder,{recursive:true});fs.writeFileSync(path.join(folder,photoId),bytes);photo={photoId,mime:'image/'+match[1]};}
- if(!photo?.photoId)fail(400,'Add a reading photo before continuing.');reading[stage]={value,photoId:photo.photoId,mime:photo.mime,recordedAt:now};audit(u,stage+'_reading_saved',run.id,beforeRun,JSON.parse(JSON.stringify(run)));save();return send(200,run);
+ let photo=reading[stage];if(b.photo){const match=/^data:image\/(jpeg|png);base64,([A-Za-z0-9+/=]+)$/.exec(b.photo);if(!match)fail(400,'Use a JPEG or PNG photo.');const bytes=Buffer.from(match[2],'base64');if(bytes.length>3*1024*1024||bytes.length<24)fail(400,'Use a photo smaller than 3 MB.');if(match[1]==='jpeg'&&!(bytes[0]===255&&bytes[1]===216&&bytes[2]===255))fail(400,'Invalid JPEG photo.');if(match[1]==='png'&&!bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))fail(400,'Invalid PNG photo.');const photoId=id();if(cloud)await cloud.upload(run.stationId,photoId,bytes,'image/'+match[1]);else{const folder=path.join(path.dirname(file),'evidence');fs.mkdirSync(folder,{recursive:true});fs.writeFileSync(path.join(folder,photoId),bytes);}photo={photoId,mime:'image/'+match[1]};}
+ if(!photo?.photoId)fail(400,'Add a reading photo before continuing.');reading[stage]={value,photoId:photo.photoId,mime:photo.mime,recordedAt:now};audit(u,stage+'_reading_saved',run.id,beforeRun,JSON.parse(JSON.stringify(run)));await save();return send(200,run);
  }
  if(action==='activate'){
  if(run.status!=='opening'||run.readings.some(n=>!n.opening?.photoId))fail(400,'Every nozzle needs an opening reading and photo.');
@@ -106,7 +111,7 @@ if(route==='/api/runs'||route.startsWith('/api/runs/')){
  }else if(action==='submit'){
  if(run.status!=='review'||!run.calculation)fail(400,'Review the shift before submitting it.');if(!reconciliation.reconcile(run).matches)fail(409,'Shift totals could not be verified. Return to review before submitting.');run.status='completed';run.completedAt=now;const assignment=db.assignments.find(a=>a.id===run.assignmentId);if(assignment)assignment.status='completed';
  }else fail(404,'Shift action not found.');
- audit(u,'shift_'+action,run.id,beforeRun,JSON.parse(JSON.stringify(run)));save();return send(200,run);
+ audit(u,'shift_'+action,run.id,beforeRun,JSON.parse(JSON.stringify(run)));await save();return send(200,run);
 }
 
 if(route.startsWith('/api/config/')){
@@ -176,12 +181,12 @@ if(route.startsWith('/api/config/')){
  const record=existing||{id:id(),stationId:u.stationId,createdAt:now,createdBy:u.id};Object.assign(record,values);if(!existing)collection.push(record);
  if(extraRate)db.rates.push({...extraRate,fuelId:record.id});
  if(kind==='salesmen'&&record.status==='inactive')for(const [token,session] of sessions)if(session.userId===record.id)sessions.delete(token);
- audit(u,kind+(existing?'_updated':'_created'),record.id,previous,JSON.parse(JSON.stringify(kind==='salesmen'?clean(record):record)));save();return send(existing?200:201,kind==='salesmen'?clean(record):record);
+ audit(u,kind+(existing?'_updated':'_created'),record.id,previous,JSON.parse(JSON.stringify(kind==='salesmen'?clean(record):record)));await save();return send(existing?200:201,kind==='salesmen'?clean(record):record);
 }
 
 if(['/api/reports','/api/reports/export','/api/audit'].includes(route)){if(u.role!=='station_admin')fail(403,'Only Station Admins can access reports.');if(req.method!=='GET')fail(405,'This action is not supported.');if(route==='/api/audit')return send(200,reporting.auditReport(db,u.stationId,url.searchParams));const report=reporting.reports(db,u.stationId,url.searchParams);if(route==='/api/reports/export'){const excel=url.searchParams.get('format')==='xlsx';res.writeHead(200,{'Content-Type':excel?'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="shift-report-'+report.from+'-to-'+report.to+(excel?'.xlsx':'.csv')+'"'});return res.end(excel?excelExport.xlsx(reporting.cells(report)):reporting.csv(reporting.cells(report)));}return send(200,report);}
 if(route==='/api/analytics'){if(u.role!=='station_admin')fail(403,'Only Station Admins can view station analytics.');if(req.method!=='GET')fail(405,'This action is not supported.');const report=reporting.reports(db,u.stationId,url.searchParams);const span=Math.round((Date.parse(report.to)-Date.parse(report.from))/86400000)+1;if(span>366)fail(400,'Choose a date range of up to 366 days.');const daily=Array.from({length:span},(_,i)=>({date:new Date(Date.parse(report.from)+i*86400000).toISOString().slice(0,10),fuelMilli:0,revenueMinor:0,shifts:0}));const byDay=new Map(daily.map(d=>[d.date,d]));for(const row of report.rows){const d=byDay.get(row.date);d.fuelMilli+=row.fuelMilli;d.revenueMinor+=row.expectedMinor;d.shifts++;}return send(200,{...report,daily,kpis:{completedShifts:report.rows.length,averageShiftRevenueMinor:report.rows.length?Math.round(report.totals.expectedMinor/report.rows.length):0,averagePriceMinor:report.totals.fuelMilli?Math.round(report.totals.expectedMinor*1000/report.totals.fuelMilli):0,collectionPercent:report.totals.expectedMinor?report.totals.cashMinor/report.totals.expectedMinor*100:null,shortageMinor:report.rows.reduce((s,r)=>s+Math.max(0,-r.varianceMinor),0),excessMinor:report.rows.reduce((s,r)=>s+Math.max(0,r.varianceMinor),0)}});}
-if(route==='/api/station-dashboard'){if(u.role!=='station_admin')fail(403,'Only your Station Admin can view operations.');if(req.method!=='GET')fail(405,'This action is not supported.');return send(200,operationsDashboard.dashboard(db,u.stationId,new Date(),photoId=>fs.existsSync(path.join(path.dirname(file),'evidence',photoId))));}
+if(route==='/api/station-dashboard'){if(u.role!=='station_admin')fail(403,'Only your Station Admin can view operations.');if(req.method!=='GET')fail(405,'This action is not supported.');return send(200,operationsDashboard.dashboard(db,u.stationId,new Date(),photoId=>cloud?Boolean(photoId):fs.existsSync(path.join(path.dirname(file),'evidence',photoId))));}
 if(route==='/api/dashboard'){
 if(u.role!=='super_admin')fail(403,'Only the Super Admin can view platform totals.');
 return send(200,{totalStations:db.stations.length,activeStations:db.stations.filter(s=>s.status==='active').length,inactiveStations:db.stations.filter(s=>s.status==='inactive').length,totalAdmins:db.users.filter(v=>v.role==='station_admin').length,totalSalesmen:db.users.filter(v=>v.role==='salesman').length,recent:db.stations.slice(-5).reverse()});}
@@ -199,7 +204,7 @@ const previous=existing?{...existing}:null;
 const values={name:b.name.trim(),owner:b.owner.trim(),city:b.city.trim(),address:b.address||'',phone:b.phone||'',email:b.email||'',status:b.status||'active'};
 const station=existing||{id:id(),createdAt:new Date().toISOString(),createdBy:u.id};Object.assign(station,values);if(!existing)db.stations.push(station);
 if(station.status==='inactive')for(const [token,session] of sessions)if(db.users.find(v=>v.id===session.userId)?.stationId===station.id)sessions.delete(token);
-audit(u,existing?'station_updated':'station_created',station.id,previous,{...station});save();return send(existing?200:201,station);}
+audit(u,existing?'station_updated':'station_created',station.id,previous,{...station});await save();return send(existing?200:201,station);}
 fail(405,'This action is not supported.');}
 if(route.startsWith('/api/users/')){
 if(u.role!=='super_admin')fail(403,'Only the Super Admin can update Station Admins.');
@@ -209,15 +214,15 @@ const email=b.email.trim().toLowerCase();if(db.users.some(v=>v.id!==target.id&&v
 if(b.stationId!==target.stationId)fail(400,'Station assignments cannot be changed here. Create an account at the correct station.');
 const previous=clean(target);Object.assign(target,{name:b.name.trim(),email,phone:String(b.phone||''),status:b.status});
 if(target.status==='inactive')for(const [token,session] of sessions)if(session.userId===target.id)sessions.delete(token);
-audit(u,'station_admin_updated',target.id,previous,clean(target));save();return send(200,clean(target));}
-if(route==='/api/users'){if(u.role==='salesman')fail(403,'You cannot manage accounts.');if(req.method==='GET')return send(200,db.users.filter(v=>u.role==='super_admin'?v.role==='station_admin':v.stationId===u.stationId&&v.role==='salesman').map(clean));if(req.method==='POST'){const b=await body(req),stationId=u.role==='super_admin'?b.stationId:u.stationId;if(!db.stations.some(s=>s.id===stationId&&s.status==='active'))fail(400,'Select an active station.');const created=addUser(b,u.role==='super_admin'?'station_admin':'salesman',stationId);audit(u,'account_created',created.id);save();return send(201,clean(created));}}
+audit(u,'station_admin_updated',target.id,previous,clean(target));await save();return send(200,clean(target));}
+if(route==='/api/users'){if(u.role==='salesman')fail(403,'You cannot manage accounts.');if(req.method==='GET')return send(200,db.users.filter(v=>u.role==='super_admin'?v.role==='station_admin':v.stationId===u.stationId&&v.role==='salesman').map(clean));if(req.method==='POST'){const b=await body(req),stationId=u.role==='super_admin'?b.stationId:u.stationId;if(!db.stations.some(s=>s.id===stationId&&s.status==='active'))fail(400,'Select an active station.');const created=addUser(b,u.role==='super_admin'?'station_admin':'salesman',stationId);audit(u,'account_created',created.id);await save();return send(201,clean(created));}}
 if(route==='/api/assignments'){if(u.role!=='salesman')fail(403,'This page is for salesmen.');return send(200,db.assignments.filter(a=>a.stationId===u.stationId&&a.salesmanId===u.id));}
 fail(404,'Page not found.');}
 if(route==='/'&&req.method==='GET'){const html=fs.readFileSync(path.join(root,'index.html'),'utf8');const script=html.match(/<script>([\s\S]*)<\/script>/)[1];const hash=crypto.createHash('sha256').update(script.replace(/\r\n?/g,'\n')).digest('base64');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'sha256-"+hash+"'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});return res.end(fs.readFileSync(path.join(root,'index.html')));}
 fail(404,'Page not found.');
  }catch(e){if(beforeMutation)db=JSON.parse(beforeMutation);send(e.status||500,{error:e.status?e.message:'Something went wrong. Please try again.'});}}
 let mutationQueue=Promise.resolve();
-const server=http.createServer((req,res)=>{if(req.method==='GET')handle(req,res);else {mutationQueue=mutationQueue.then(()=>handle(req,res)).catch(()=>{if(!res.writableEnded){res.writeHead(500);res.end('Unable to save this request.');}});}});
+const server=http.createServer((req,res)=>{if(req.method==='GET'&&!cloud)handle(req,res);else {mutationQueue=mutationQueue.then(()=>handle(req,res)).catch(()=>{if(!res.writableEnded){res.writeHead(500);res.end('Unable to save this request.');}});}});
 server.requestTimeout=15000;server.headersTimeout=15000;
 const cleanup=setInterval(()=>{const now=Date.now();for(const [key,value]of sessions)if(value.expires<=now)sessions.delete(key);for(const[key,value]of attempts)if(now-value.time>=900000)attempts.delete(key);},60000);cleanup.unref();
 if(require.main===module)server.listen(runtime.port,runtime.bind,()=>console.log('Fuel portal ready at '+(runtime.origin||'http://127.0.0.1:'+runtime.port)));

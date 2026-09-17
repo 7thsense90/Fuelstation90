@@ -10,7 +10,7 @@ function configuration(env = process.env) {
     origin = url.origin;
   }
   if (production && !origin) throw Error('Production requires PUBLIC_ORIGIN.');
-  if (production && !env.FUEL_DATA_DIR) throw Error('Production requires a persistent FUEL_DATA_DIR.');
+  if (production && !env.SUPABASE_URL && !env.FUEL_DATA_DIR) throw Error('Production requires a persistent FUEL_DATA_DIR.');
   const port = Number(env.PORT || 4310);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw Error('Invalid PORT.');
   return {

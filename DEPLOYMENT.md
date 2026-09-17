@@ -6,7 +6,7 @@ The Node.js server runs the portal and enforces its existing role and station pe
 
 Passwords remain scrypt hashes and sign-in remains the portal's own authentication. This release does not use Supabase Auth, introduce public registration, or require existing users to change passwords. Cookie tokens are hashed before cloud storage.
 
-All portal tables have RLS enabled and browser-role grants revoked. Only the server role can execute the load/save functions. Supabase's informational â€œRLS Enabled No Policyâ€ notice is intentional: browser roles have no direct table access. Station authorization is enforced in the Node.js server.
+All portal tables have RLS enabled and browser-role grants revoked. Only the server role can execute the load/save functions. Supabase's informational “RLS Enabled No Policy” notice is intentional: browser roles have no direct table access. Station authorization is enforced in the Node.js server.
 
 Updates use a transaction and revision check. Conflicts return a refresh-and-retry message rather than overwriting a newer save. This release loads full collections per request and is suitable for a small pilot; high-volume deployments require paginated queries and narrower transactions.
 

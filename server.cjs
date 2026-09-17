@@ -52,7 +52,7 @@ if(!u||u.status!=='active'||(u.stationId&&db.stations.find(s=>s.id===u.stationId
 if(route==='/api/logout'){sessions.delete(sessionKey(token));if(cloud)await save();res.setHeader('Set-Cookie','session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'+runtime.cookieSuffix);return send(200,{ok:true});}
 if(route==='/api/me')return send(200,{user:clean(u),station:db.stations.find(s=>s.id===u.stationId)||null});
 
-ï»¿ï»¿ï»¿if(route==='/api/reconciliation-settings'){
+if(route==='/api/reconciliation-settings'){
  if(u.role!=='station_admin')fail(403,'Only Station Admins can configure reconciliation.');const station=db.stations.find(s=>s.id===u.stationId);if(req.method==='GET')return send(200,{frequency:station.reconciliationFrequency||'weekly'});const b=await body(req);if(!['daily','weekly','monthly'].includes(b.frequency))fail(400,'Choose daily, weekly or monthly.');const previous=station.reconciliationFrequency||'weekly';station.reconciliationFrequency=b.frequency;audit(u,'reconciliation_frequency_updated',station.id,{frequency:previous},{frequency:b.frequency});await save();return send(200,{frequency:b.frequency});
 }
 if(route==='/api/meter-reconciliations'||route.startsWith('/api/meter-reconciliations/')){

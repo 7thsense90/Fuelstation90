@@ -1,0 +1,6 @@
+*
+!*.cjs
+!index.html
+!package.json
+!Dockerfile
+test*.cjs

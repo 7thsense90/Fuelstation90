@@ -1,0 +1,9 @@
+{
+  "name": "fuel-station-portal",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "start": "node --preserve-symlinks-main --preserve-symlinks server.cjs",
+    "test": "node --preserve-symlinks-main --preserve-symlinks test.cjs && node --preserve-symlinks-main --preserve-symlinks test-runtime.cjs"
+  }
+}

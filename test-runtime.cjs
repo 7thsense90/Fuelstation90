@@ -5,6 +5,9 @@ const eq=(a,b)=>{assert.deepEqual(a,b);checks++};
 for(const env of [{NODE_ENV:'production'},{NODE_ENV:'production',PUBLIC_ORIGIN:'https://portal.example.test'},{PUBLIC_ORIGIN:'http://portal.example.test'},{PUBLIC_ORIGIN:'https://portal.example.test/path'},{PORT:'invalid'}]){assert.throws(()=>configuration(env));checks++;}
 eq(configuration({}).acceptsHost('evil.example'),false);
 eq(configuration({}).acceptsHost('localhost:4310'),true);
+const hosted=configuration({NODE_ENV:'production',PORTAL_ORIGIN:'https://fuelstation90.vercel.app',SUPABASE_URL:'https://example.supabase.co'});
+eq(hosted.origin,'https://fuelstation90.vercel.app');eq(hosted.acceptsHost('fuelstation90.vercel.app'),true);eq(hosted.acceptsHost('evil.example'),false);eq(hosted.acceptsOrigin('https://evil.example','fuelstation90.vercel.app'),false);
+assert.throws(()=>configuration({PORTAL_ORIGIN:'http://fuelstation90.vercel.app'}));checks++;
 process.env.NODE_ENV='production';process.env.PUBLIC_ORIGIN='https://portal.example.test';
 process.env.FUEL_DATA_DIR=fs.mkdtempSync(path.join(os.tmpdir(),'fuel-hosting-test-'));
 const salt=crypto.randomBytes(16).toString('hex'),password='TestingHosting2026!';
@@ -25,3 +28,4 @@ const call=(route,data,headers={})=>new Promise((resolve,reject)=>{
  eq(logout.status,200);eq(logout.headers['set-cookie'][0].includes('; Secure'),true);
  console.log(checks+' deployment configuration and HTTP checks passed.');
 }finally{await new Promise(r=>server.close(r));}})().catch(e=>{console.error(e);process.exitCode=1;});
+

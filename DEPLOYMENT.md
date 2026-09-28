@@ -55,3 +55,8 @@ Run npm test for isolated application, hosting and mocked cloud API tests. Datab
 Before production acceptance, complete backup scheduling and cloud restore drills, monitoring, account recovery, full server-side image decoding and physical phone testing. Unreferenced photos from failed or replaced drafts need a retention job. Review Supabase's backup coverage for your plan; database backups do not themselves back up Storage objects.
 
 The optional Docker/Caddy files remain an alternative server-hosting route. They are not required for Hostinger's managed Node.js hosting.
+
+## Vercel
+
+Set PORTAL_ORIGIN as a Production config variable to the exact HTTPS portal address. It takes precedence over legacy PUBLIC_ORIGIN, retaining strict Host/Origin checks. Keep SUPABASE_URL and SUPABASE_SECRET_KEY configured on the server. GitHub main pushes trigger production builds. Redeploy after changing environment values.
+

@@ -2,8 +2,9 @@
 function configuration(env = process.env) {
   const production = env.NODE_ENV === 'production';
   let origin = null;
-  if (env.PUBLIC_ORIGIN) {
-    const url = new URL(env.PUBLIC_ORIGIN);
+  const configuredOrigin = env.PORTAL_ORIGIN || env.PUBLIC_ORIGIN;
+  if (configuredOrigin) {
+    const url = new URL(configuredOrigin);
     if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
       throw Error('PUBLIC_ORIGIN must be an HTTPS origin without a path or credentials.');
     }
@@ -24,3 +25,4 @@ function configuration(env = process.env) {
   };
 }
 module.exports = { configuration };
+

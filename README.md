@@ -1,4 +1,4 @@
-# Fuel Station Operations Portal
+# Fuelstation90.com
 
 A Node.js portal with Super Admin, Station Admin and Salesman roles.
 
@@ -36,3 +36,7 @@ Local records are in `data/store.json`; photos are in `data/evidence/`. Both are
 The default server is local-only. Hosted mode requires an HTTPS `PUBLIC_ORIGIN`, a persistent `FUEL_DATA_DIR`, and a previously provisioned active Super Admin. See [DEPLOYMENT.md](DEPLOYMENT.md) for the optional single-server container configuration and outstanding production work.
 
 This is a development build with deployment preparation. It is not yet a verified live production service. Local mode uses a single-process JSON store. Supabase mode adds transaction-protected cloud records, persistent sessions and private photos. Existing authentication is preserved; Supabase Auth is not used. Account recovery and production acceptance remain pending.
+
+## Branding and responsive interface
+
+Fuelstation90.com uses the same blue fuel-drop mark on sign-in, admin and salesman screens, and the browser icon. Admin navigation collapses into a Menu button on phones. Tables remain horizontally scrollable within their panels, while filters, date ranges and reconciliation forms stack for narrow screens.

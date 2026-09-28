@@ -1,3 +1,4 @@
+const standing=require('./standing-assignments.cjs');
 const meterComparison=require('./meter-reconciliation.cjs');
 const reporting=require('./reports.cjs'), excelExport=require('./xlsx.cjs');
 const operationsDashboard=require('./dashboard.cjs');
@@ -50,6 +51,10 @@ const token=(req.headers.cookie||'').split('; ').find(c=>c.startsWith('session='
 if(route.startsWith('/api/')){
 if(!u||u.status!=='active'||(u.stationId&&db.stations.find(s=>s.id===u.stationId)?.status!=='active'))fail(401,'Please sign in to continue.');
 if(route==='/api/logout'){sessions.delete(sessionKey(token));if(cloud)await save();res.setHeader('Set-Cookie','session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'+runtime.cookieSuffix);return send(200,{ok:true});}
+if(u.stationId&&standing.materialize(db,u.stationId)){await save();if(beforeMutation)beforeMutation=JSON.stringify(db);}
+if(route==='/api/standing-assignments'||route.startsWith('/api/standing-assignments/')){
+if(u.role!=='station_admin')fail(403,'Only Station Admins can manage standing assignments.');const key=route.split('/')[3],old=key?db.assignments.find(a=>a.id===key&&a.stationId===u.stationId&&['standing','ended'].includes(a.status)):null;if(key&&!old)fail(404,'Standing assignment not found.');if(req.method==='GET')return send(200,db.assignments.filter(a=>a.stationId===u.stationId&&['standing','ended'].includes(a.status)));const b=await body(req);if(old&&old.status!=='standing')fail(409,'This standing assignment has ended.');const previous=old?structuredClone(old):null;let record;if(b.action==='end'){if(!old)fail(404,'Standing assignment not found.');standing.stop(db,old,new Date().toISOString());record=old;}else record=standing.create(db,u,b,fail,new Date().toISOString(),old);audit(u,'standing_assignment_'+(b.action==='end'?'ended':old?'updated':'created'),record.id,previous,structuredClone(record));await save();return send(old?200:201,record);
+}
 if(route==='/api/me')return send(200,{user:clean(u),station:db.stations.find(s=>s.id===u.stationId)||null});
 
 if(route==='/api/reconciliation-settings'){
@@ -120,7 +125,7 @@ if(route.startsWith('/api/config/')){
  if(!kinds.includes(kind))fail(404,'Page not found.');
  if(u.role!=='station_admin'&&!(u.role==='salesman'&&kind==='assignments'&&req.method==='GET'))fail(403,'Only your Station Admin can manage station setup.');
  const collection=kind==='salesmen'?db.users:db[kind];
- const scoped=()=>collection.filter(r=>r.stationId===u.stationId&&(kind!=='salesmen'||r.role==='salesman')&&(u.role!=='salesman'||r.salesmanId===u.id));
+ const scoped=()=>collection.filter(r=>r.stationId===u.stationId&&(kind!=='assignments'||!['standing','ended'].includes(r.status))&&(kind!=='salesmen'||r.role==='salesman')&&(u.role!=='salesman'||r.salesmanId===u.id));
  const existing=recordId?scoped().find(r=>r.id===recordId):null;
  if(recordId&&!existing)fail(404,'Record not found in your station.');
  if(req.method==='GET')return send(200,existing?(kind==='salesmen'?clean(existing):existing):scoped().map(r=>kind==='salesmen'?clean(r):r));
@@ -131,7 +136,7 @@ if(route.startsWith('/api/config/')){
  const ref=(type,key)=>{const r=db[type].find(r=>r.id===b[key]&&r.stationId===u.stationId&&r.status==='active'&&(type!=='users'||r.role==='salesman'));if(!r)fail(400,'Select an active record belonging to your station.');return r;};
  const unique=(key,value)=>{if(scoped().some(r=>r.id!==recordId&&String(r[key]).toLowerCase()===value.toLowerCase()))fail(409,'That name or identifier is already used in your station.');};
  const rateValue=()=>{if(!/^\d+(\.\d{1,2})?$/.test(String(b.amount))||Number(b.amount)<=0||Number(b.amount)>1000000)fail(400,'Enter a positive fuel rate with at most two decimal places.');return reconciliation.parseDecimal(b.amount,2,'fuel rate');};
- const futureAssignments=()=>db.assignments.filter(a=>a.stationId===u.stationId&&a.status==='scheduled'&&a.endsAt>now);
+ const futureAssignments=()=>db.assignments.filter(a=>a.stationId===u.stationId&&(a.status==='standing'||a.status==='scheduled'&&a.endsAt>now));
  const ensureUnassigned=(key,value)=>{if(futureAssignments().some(a=>a[key]===value)||db.runs.some(r=>r.status!=='completed'&&(key==='shiftId'?db.assignments.find(a=>a.id===r.assignmentId)?.shiftId===value:r[key]===value)))fail(409,'Cancel the upcoming assignment before deactivating this record.');};
  let values,extraRate;
  if(kind==='fuels'){
@@ -171,6 +176,7 @@ if(route.startsWith('/api/config/')){
  // The original brief uses rupees; station scheduling currently uses Pakistan time explicitly.
  const startsAt=new Date(b.date+'T'+shift.startTime+':00+05:00').toISOString();let end=new Date(b.date+'T'+shift.endTime+':00+05:00');if(shift.endTime<shift.startTime)end=new Date(end.getTime()+86400000);const endsAt=end.toISOString();
  if(startsAt<now)fail(400,'Choose a shift that starts in the future.');
+ if(db.assignments.some(a=>a.status==='standing'&&standing.conflicts(a,{stationId:u.stationId,salesmanId:salesman.id,machineId:machine.id,startsAt,endsAt,status:'scheduled'})))fail(409,'This salesman or machine has an overlapping standing assignment.');
  if(db.assignments.some(a=>a.stationId===u.stationId&&a.status==='scheduled'&&a.startsAt<endsAt&&a.endsAt>startsAt&&(a.salesmanId===salesman.id||a.machineId===machine.id)))fail(409,'The salesman or machine already has an overlapping assignment.');
  const nozzles=db.nozzles.filter(n=>n.stationId===u.stationId&&n.machineId===machine.id&&n.status==='active');if(!nozzles.length)fail(400,'Add an active nozzle to this machine first.');
  if(nozzles.some(n=>!db.fuels.some(f=>f.id===n.fuelId&&f.status==='active')||!db.rates.some(r=>r.fuelId===n.fuelId&&r.effectiveAt<=startsAt)))fail(400,'Every nozzle needs an active fuel type and a rate effective by shift start.');
@@ -216,15 +222,16 @@ const previous=clean(target);Object.assign(target,{name:b.name.trim(),email,phon
 if(target.status==='inactive')for(const [token,session] of sessions)if(session.userId===target.id)sessions.delete(token);
 audit(u,'station_admin_updated',target.id,previous,clean(target));await save();return send(200,clean(target));}
 if(route==='/api/users'){if(u.role==='salesman')fail(403,'You cannot manage accounts.');if(req.method==='GET')return send(200,db.users.filter(v=>u.role==='super_admin'?v.role==='station_admin':v.stationId===u.stationId&&v.role==='salesman').map(clean));if(req.method==='POST'){const b=await body(req),stationId=u.role==='super_admin'?b.stationId:u.stationId;if(!db.stations.some(s=>s.id===stationId&&s.status==='active'))fail(400,'Select an active station.');const created=addUser(b,u.role==='super_admin'?'station_admin':'salesman',stationId);audit(u,'account_created',created.id);await save();return send(201,clean(created));}}
-if(route==='/api/assignments'){if(u.role!=='salesman')fail(403,'This page is for salesmen.');return send(200,db.assignments.filter(a=>a.stationId===u.stationId&&a.salesmanId===u.id));}
+if(route==='/api/assignments'){if(u.role!=='salesman')fail(403,'This page is for salesmen.');return send(200,db.assignments.filter(a=>a.stationId===u.stationId&&a.salesmanId===u.id&&!['standing','ended'].includes(a.status)));}
 fail(404,'Page not found.');}
 if(route==='/'&&req.method==='GET'){const html=fs.readFileSync(path.join(root,'index.html'),'utf8');const script=html.match(/<script>([\s\S]*)<\/script>/)[1];const hash=crypto.createHash('sha256').update(script.replace(/\r\n?/g,'\n')).digest('base64');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'sha256-"+hash+"'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});return res.end(fs.readFileSync(path.join(root,'index.html')));}
 fail(404,'Page not found.');
  }catch(e){if(beforeMutation)db=JSON.parse(beforeMutation);send(e.status||500,{error:e.status?e.message:'Something went wrong. Please try again.'});}}
 let mutationQueue=Promise.resolve();
-const server=http.createServer((req,res)=>{if(req.method==='GET'&&!cloud)handle(req,res);else {mutationQueue=mutationQueue.then(()=>handle(req,res)).catch(()=>{if(!res.writableEnded){res.writeHead(500);res.end('Unable to save this request.');}});}});
+const server=http.createServer((req,res)=>{{mutationQueue=mutationQueue.then(()=>handle(req,res)).catch(()=>{if(!res.writableEnded){res.writeHead(500);res.end('Unable to save this request.');}});}});
 server.requestTimeout=15000;server.headersTimeout=15000;
 const cleanup=setInterval(()=>{const now=Date.now();for(const [key,value]of sessions)if(value.expires<=now)sessions.delete(key);for(const[key,value]of attempts)if(now-value.time>=900000)attempts.delete(key);},60000);cleanup.unref();
 if(require.main===module)server.listen(runtime.port,runtime.bind,()=>console.log('Fuel portal ready at '+(runtime.origin||'http://127.0.0.1:'+runtime.port)));
 module.exports={server};
+
 
